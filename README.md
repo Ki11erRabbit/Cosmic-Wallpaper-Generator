@@ -11,25 +11,25 @@ It may be heavily vibe-coded, but it does a remarkable job at generating wallpap
 
 ## Examples
 
-####### Cyan Nebula
+###### Cyan Nebula
 ```bash
 python wallpaper_gen.py --width 1920 --height 1080 --style nebula --seed 1720106352 --out cyan-galaxy.png --colors #21aacc #aacc21 #21ccaa
 ```
 ![Cyan Nebula](images/cyan-galaxy.png)
 
-####### Cotton Candy Galaxy
+###### Cotton Candy Galaxy
 ```bash
 python wallpaper_gen.py --width 1920 --height 1080 --style cosmic --seed 66907707 --out cotton-candy-galaxy.png --expand interpolate --expand-count 4 --colors #5bcefa #f5a9b8 #ffffff
 ```
 ![Cotton Candy Galaxy](images/cotton-candy-galaxy.png)
 
-####### Cool Lava
+###### Cool Lava
 ```bash
 python wallpaper_gen.py --width 1920 --height 1080 --style lava --seed 1251825976 --out cool-lava.png --colors #D60270 #9B4F96 #0038A8
 ```
 ![Cool Lava](images/cool-lava.png)
 
-####### Psychedelic
+###### Psychedelic
 ```bash
 python wallpaper_gen.py --width 1920 --height 1080 --style tiedye --out psychedelic.png --seed 397828539 --colors #FF218C #FFD800 #21B1FF
 ```
