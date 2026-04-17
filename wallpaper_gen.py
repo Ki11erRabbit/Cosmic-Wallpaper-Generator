@@ -304,7 +304,7 @@ def generate_cosmic(shape, colors, seed):
     gas_noise = fbm((h, w), octaves=6, scale=0.8, seed=rng.integers(0, 2**31))
     gas_density = np.clip(gas_noise * np.exp(-r * 1.5) + gas_noise * 0.2, 0, 1)
     lut_gas = build_lut(colors, 2048)
-    gas_img = apply_lut(gas_density, lut_gas, equalize=0.75, n_colors=len(colors)).astype(np.float64)
+    gas_img = apply_lut(gas_density, lut_gas, equalize=0.5, n_colors=len(colors)).astype(np.float64)
     # Modulate by density so thin gas is dim; result stays 0-255
     gas_img *= gas_density[:,:,None]
 
@@ -327,16 +327,16 @@ def generate_cosmic(shape, colors, seed):
     arm_colors = colors[rot:] + colors[:rot]
     lut_arm = build_lut(arm_colors, 2048)
     # arm_img: color from LUT, masked by arm_field so inter-arm gaps are dark
-    arm_img = apply_lut(arm_field, lut_arm, equalize=0.75, n_colors=len(arm_colors)).astype(np.float64)
+    arm_img = apply_lut(arm_field, lut_arm, equalize=0.5, n_colors=len(arm_colors)).astype(np.float64)
     arm_img *= arm_field[:,:,None]   # 0-255 attenuated by arm intensity
 
     # ── Layer 4: Central glowing core ──
     body_radius = rng.uniform(0.05, 0.12)
     core_field = np.exp(-(r**2) / (body_radius**2 * 0.5))
-    core_color = np.array([255, 255, 220], dtype=np.float64)
+    # Use the brightest palette color for the core instead of hardcoded white/yellow
+    inner_color = np.array(colors[-1], dtype=np.float64)
     outer_color = np.array(colors[len(colors)//2], dtype=np.float64)
-    # core_img in 0-255 range before bloom
-    core_img = (core_color[None,None,:] * core_field[:,:,None]
+    core_img = (inner_color[None,None,:] * core_field[:,:,None]
                 + outer_color[None,None,:] * np.clip(core_field * 0.3, 0, 1)[:,:,None])
     # Bloom: accumulate into a separate buffer so we control its weight
     core_bloom = np.zeros_like(core_img)
