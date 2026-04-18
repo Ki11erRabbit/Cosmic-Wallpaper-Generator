@@ -151,6 +151,65 @@ def color_grade(arr, contrast=1.1, saturation=1.2):
 
 # ── NEBULA ────────────────────────────────────────────────────────────────────
 
+def _nebula_palette_weights(colors):
+    """
+    Compute per-color LUT weights for nebula. Near-white and near-black colors
+    are visually dominant in the bloom step — white blows out and pure black is
+    invisible — so we down-weight them in the LUT so chromatic colors get more
+    image real-estate.
+
+    Returns a list of floats (one per color, summing to len(colors)) used to
+    warp the LUT stop positions. Weight < 1 = compressed band, > 1 = expanded.
+    Also returns (has_achromatic, mean_lightness) for caller to adapt bloom.
+    """
+    labs = [rgb_to_oklab(c) for c in colors]
+    weights = []
+    for L, a, b in labs:
+        chroma = np.sqrt(a**2 + b**2)
+        # Proximity to white (L~1, low chroma) or black (L~0)
+        near_white = max(0.0, (L - 0.80) / 0.20) * max(0.0, 1.0 - chroma / 0.08)
+        near_black = max(0.0, (0.25 - L) / 0.25)
+        achromatic_penalty = max(near_white, near_black)
+        weights.append(max(0.25, 1.0 - 0.75 * achromatic_penalty))
+    mean_L = np.mean([lab[0] for lab in labs])
+    has_achromatic = any(
+        (lab[0] > 0.80 and np.sqrt(lab[1]**2+lab[2]**2) < 0.08) or lab[0] < 0.25
+        for lab in labs
+    )
+    return weights, has_achromatic, mean_L
+
+def build_lut_weighted(colors, weights, n=2048):
+    """
+    Like build_lut but each color's LUT band is scaled by its weight.
+    Low-weight colors (near white/black) occupy less of the LUT so chromatic
+    colors dominate the visible output.
+    """
+    labs = [rgb_to_oklab(c) for c in colors]
+    # Raw perceptual arc-length between consecutive stops
+    raw_dists = [0.0]
+    for i in range(1, len(labs)):
+        dL = labs[i][0]-labs[i-1][0]; da = labs[i][1]-labs[i-1][1]; db = labs[i][2]-labs[i-1][2]
+        raw_dists.append(np.sqrt(dL**2+da**2+db**2))
+    # Scale each segment by the average weight of its two endpoints
+    seg_weights = [1.0]  # dummy for index 0
+    for i in range(1, len(labs)):
+        seg_weights.append((weights[i-1] + weights[i]) / 2.0)
+    weighted = [raw_dists[i] * seg_weights[i] for i in range(len(raw_dists))]
+    cumulative = np.cumsum(weighted)
+    total = cumulative[-1]
+    if total < 1e-9:
+        return np.tile(oklab_to_rgb(labs[0]), (n, 1)).astype(np.uint8)
+    stops = cumulative / total
+    stops[0] = 0.0
+    t = np.linspace(0, 1, n)
+    L_vals = np.interp(t, stops, [lab[0] for lab in labs])
+    a_vals = np.interp(t, stops, [lab[1] for lab in labs])
+    b_vals = np.interp(t, stops, [lab[2] for lab in labs])
+    rgb_lut = np.zeros((n, 3), dtype=np.uint8)
+    for i in range(n):
+        rgb_lut[i] = oklab_to_rgb((L_vals[i], a_vals[i], b_vals[i]))
+    return rgb_lut
+
 def generate_nebula(shape, colors, seed):
     rng = np.random.default_rng(seed)
     h, w = shape
@@ -187,10 +246,11 @@ def generate_nebula(shape, colors, seed):
     cloud_field = cloud_field * (1.0 - 0.7 * dust)
     cloud_field = np.clip(cloud_field, 0, 1)
 
-    # 4. Multi-color nebula: map different cloud density ranges to different colors
-    # Use two separate color zones with a blend
-    lut_a = build_lut(colors, 2048)
-    lut_b = build_lut(list(reversed(colors)), 2048)
+    # 4. Multi-color nebula: map different cloud density ranges to different colors.
+    # Down-weight near-white and near-black colors so chromatic hues dominate.
+    weights, has_achromatic, mean_L = _nebula_palette_weights(colors)
+    lut_a = build_lut_weighted(colors, weights, 2048)
+    lut_b = build_lut_weighted(list(reversed(colors)), list(reversed(weights)), 2048)
     zone = fbm((h, w), octaves=4, scale=0.5, seed=rng.integers(0, 2**31))
     # Equalize cloud_field so dark/bright palette entries both appear
     cloud_eq = equalize_field(cloud_field, strength=0.80)
@@ -198,14 +258,16 @@ def generate_nebula(shape, colors, seed):
     img_b = apply_lut(cloud_eq, lut_b, equalize=0, n_colors=len(colors)).astype(np.float64)
     canvas = img_a * zone[:,:,None] + img_b * (1-zone[:,:,None])
 
-    # 5. Emission glow: blur bright regions and add back (bloom effect)
+    # 5. Emission glow: blur bright regions and add back (bloom effect).
+    # Reduce bloom strength for high-luminance or achromatic palettes to avoid blowout.
+    bloom_scale = 0.5 if has_achromatic else (0.7 if mean_L > 0.70 else 1.0)
     brightness = cloud_field ** 1.5
     for sigma, strength in [(8, 0.4), (20, 0.25), (50, 0.15)]:
         glow_r = gaussian_filter(canvas[:,:,0] * brightness, sigma=sigma)
         glow_g = gaussian_filter(canvas[:,:,1] * brightness, sigma=sigma)
         glow_b = gaussian_filter(canvas[:,:,2] * brightness, sigma=sigma)
         glow = np.stack([glow_r, glow_g, glow_b], axis=2)
-        canvas = canvas + strength * glow
+        canvas = canvas + (strength * bloom_scale) * glow
 
     # 6. Stars — clustered near bright nebula + random field stars
     # Paint point sources onto sparse arrays, then Gaussian-blur for smooth
