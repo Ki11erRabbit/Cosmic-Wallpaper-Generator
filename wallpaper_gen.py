@@ -152,39 +152,67 @@ def color_grade(arr, contrast=1.1, saturation=1.2):
 # ── NEBULA ────────────────────────────────────────────────────────────────────
 
 def generate_nebula(shape, colors, seed):
-    rng = np.random.default_rng(seed)
     h, w = shape
-    canvas = np.zeros((h, w, 3), dtype=np.float64)
-    n_clouds = rng.integers(4, 9)
-    cloud_field = np.zeros((h, w), dtype=np.float64)
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
-    for _ in range(n_clouds):
-        cx = rng.uniform(0.1, 0.9) * w
-        cy = rng.uniform(0.1, 0.9) * h
-        rx = rng.uniform(0.08, 0.35) * w
-        ry = rng.uniform(0.08, 0.30) * h
-        angle = rng.uniform(0, np.pi)
-        cos_a, sin_a = np.cos(angle), np.sin(angle)
+
+    # ── Draw ALL structural parameters before any pixel-resolution work ──
+    # This ensures the rng state is identical regardless of (h, w), so the
+    # same seed produces the same composition at any resolution.
+    rng = np.random.default_rng(seed)
+    n_clouds      = int(rng.integers(3, 10))
+    cloud_weights = rng.uniform(0.3, 1.0, n_clouds)
+    cloud_cx      = rng.uniform(0.05, 0.95, n_clouds)   # normalised 0-1
+    cloud_cy      = rng.uniform(0.05, 0.95, n_clouds)
+    cloud_rx      = rng.uniform(0.05, 0.45, n_clouds)   # fraction of width
+    cloud_ry      = rng.uniform(0.04, 0.35, n_clouds)   # fraction of height
+    cloud_angles  = rng.uniform(0, np.pi, n_clouds)
+    cloud_nscales = rng.uniform(1.0, 3.5, n_clouds)
+    dust_thresh   = float(rng.uniform(0.45, 0.65))
+    dust_strength = float(rng.uniform(0.5, 0.85))
+    zone_scale    = float(rng.uniform(0.3, 0.8))
+    # Sub-seeds for all noise fields — generated before any pixel draws
+    cloud_noise_seeds = rng.integers(0, 2**31, n_clouds)
+    dust_seed          = int(rng.integers(0, 2**31))
+    zone_seed          = int(rng.integers(0, 2**31))
+    star_seed          = int(rng.integers(0, 2**31))
+
+    # ── Build cloud field using pre-drawn parameters ──
+    cloud_field = np.zeros((h, w), dtype=np.float64)
+    for k in range(n_clouds):
+        cx = cloud_cx[k] * w
+        cy = cloud_cy[k] * h
+        rx = cloud_rx[k] * w
+        ry = cloud_ry[k] * h
+        cos_a = np.cos(cloud_angles[k])
+        sin_a = np.sin(cloud_angles[k])
         dx = (xx - cx) * cos_a + (yy - cy) * sin_a
         dy = -(xx - cx) * sin_a + (yy - cy) * cos_a
         blob = np.exp(-0.5 * ((dx/rx)**2 + (dy/ry)**2))
-        noise = fbm((h, w), octaves=5, scale=2.0, seed=rng.integers(0, 2**31))
-        blob = blob * (0.6 + 0.4 * noise)
-        cloud_field += blob * rng.uniform(0.5, 1.0)
+        noise = fbm((h, w), octaves=5, scale=cloud_nscales[k], seed=cloud_noise_seeds[k])
+        blob = blob * (0.5 + 0.5 * noise)
+        cloud_field += blob * cloud_weights[k]
+
     cloud_field = np.clip(cloud_field, 0, None)
     cloud_field /= cloud_field.max() + 1e-9
-    dust = fbm((h, w), octaves=8, scale=0.7, seed=rng.integers(0, 2**31))
-    dust = np.where(dust > 0.55, (dust - 0.55) / 0.45, 0.0)
-    cloud_field = np.clip(cloud_field * (1.0 - 0.7 * dust), 0, 1)
+
+    # Dust lanes
+    dust = fbm((h, w), octaves=8, scale=0.7, seed=dust_seed)
+    dust = np.where(dust > dust_thresh, (dust - dust_thresh) / (1 - dust_thresh), 0.0)
+    cloud_field = np.clip(cloud_field * (1.0 - dust_strength * dust), 0, 1)
+
+    # ── Color mapping ──
+    cloud_eq = equalize_field(cloud_field, strength=0.45)
+    zone = fbm((h, w), octaves=4, scale=zone_scale, seed=zone_seed)
     lut_a = build_lut(colors, 2048)
     lut_b = build_lut(list(reversed(colors)), 2048)
-    zone = fbm((h, w), octaves=4, scale=0.5, seed=rng.integers(0, 2**31))
-    cloud_eq = equalize_field(cloud_field, strength=0.80)
-    img_a = apply_lut(cloud_eq, lut_a, equalize=0, n_colors=len(colors)).astype(np.float64)
-    img_b = apply_lut(cloud_eq, lut_b, equalize=0, n_colors=len(colors)).astype(np.float64)
-    canvas = img_a * zone[:,:,None] + img_b * (1-zone[:,:,None])
-    brightness = cloud_field ** 1.5
-    for sigma, strength in [(8, 0.4), (20, 0.25), (50, 0.15)]:
+    img_a = apply_lut(cloud_eq, lut_a, equalize=0).astype(np.float64)
+    img_b = apply_lut(cloud_eq, lut_b, equalize=0).astype(np.float64)
+    canvas = img_a * zone[:,:,None] + img_b * (1 - zone[:,:,None])
+    canvas *= cloud_field[:,:,None]
+
+    # Emission glow
+    brightness = cloud_field ** 2
+    for sigma, strength in [(6, 0.5), (18, 0.3), (55, 0.15)]:
         glow = np.stack([gaussian_filter(canvas[:,:,c] * brightness, sigma=sigma) for c in range(3)], axis=2)
         canvas = canvas + strength * glow
     prob = cloud_field / (cloud_field.sum() + 1e-9)
@@ -274,45 +302,56 @@ def generate_lava(shape, colors, seed):
 # ── COSMIC ────────────────────────────────────────────────────────────────────
 
 def generate_cosmic(shape, colors, seed):
-    rng = np.random.default_rng(seed)
     h, w = shape
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
-    cx = w * rng.uniform(0.35, 0.65)
-    cy = h * rng.uniform(0.35, 0.65)
+
+    # ── Draw ALL structural parameters before any pixel-resolution work ──
+    rng = np.random.default_rng(seed)
+    cx_frac       = float(rng.uniform(0.35, 0.65))   # normalised centre
+    cy_frac       = float(rng.uniform(0.35, 0.65))
+    n_arms        = int(rng.integers(2, 5))
+    arm_tightness = float(rng.uniform(1.5, 4.0))
+    spiral_phase  = float(rng.uniform(0, 2*np.pi))
+    body_radius   = float(rng.uniform(0.05, 0.12))   # fraction of min(w,h)
+    # Sub-seeds — all drawn before any h*w arrays
+    gas_seed      = int(rng.integers(0, 2**31))
+    arm_noise_seed= int(rng.integers(0, 2**31))
+    star_seed     = int(rng.integers(0, 2**31))
+
+    cx = cx_frac * w
+    cy = cy_frac * h
     dx = (xx - cx) / w
     dy = (yy - cy) / h
-    r = np.sqrt(dx**2 + dy**2) + 1e-9
+    r  = np.sqrt(dx**2 + dy**2) + 1e-9
 
-    # ── Layer 1: Star field (vectorised — no pixel loops) ──
-    star_bg = np.zeros((h, w, 3), dtype=np.float64)
+    # ── Layer 1: Star field ──
+    star_rng = np.random.default_rng(star_seed)
     n_stars = int(h * w * 0.0012)
-    sy = rng.integers(0, h, n_stars)
-    sx = rng.integers(0, w, n_stars)
-    sb = rng.uniform(60, 255, n_stars)
-    scol = np.array([colors[i] for i in rng.integers(0, len(colors), n_stars)], dtype=np.float64) / 255.0
+    # Star positions as fractions so they map to same locations at any resolution
+    sy_frac = star_rng.uniform(0, 1, n_stars)
+    sx_frac = star_rng.uniform(0, 1, n_stars)
+    sb      = star_rng.uniform(60, 255, n_stars)
+    scol    = np.array([colors[i] for i in star_rng.integers(0, len(colors), n_stars)], dtype=np.float64) / 255.0
+    sy = (sy_frac * h).astype(np.int32).clip(0, h-1)
+    sx = (sx_frac * w).astype(np.int32).clip(0, w-1)
     dots_star = np.zeros((h, w, 3), dtype=np.float64)
     for i in range(n_stars):
-        dots_star[int(sy[i]), int(sx[i])] += scol[i] * (sb[i] / 255.0)
+        dots_star[sy[i], sx[i]] += scol[i] * (sb[i] / 255.0)
     star_sigma = max(0.5, min(w, h) * 0.0006)
+    star_bg = np.zeros((h, w, 3), dtype=np.float64)
     for ch in range(3):
         star_bg[:,:,ch] = (gaussian_filter(dots_star[:,:,ch], sigma=star_sigma) * 1.0 +
                            gaussian_filter(dots_star[:,:,ch], sigma=star_sigma*4) * 0.3)
 
     # ── Layer 2: Nebula gas ──
-    # gas_img is 0-255 RGB; attenuate by density so it's dark away from center,
-    # then scale to 0-1 for compositing
-    gas_noise = fbm((h, w), octaves=6, scale=0.8, seed=rng.integers(0, 2**31))
+    gas_noise = fbm((h, w), octaves=6, scale=0.8, seed=gas_seed)
     gas_density = np.clip(gas_noise * np.exp(-r * 1.5) + gas_noise * 0.2, 0, 1)
     lut_gas = build_lut(colors, 2048)
     gas_img = apply_lut(gas_density, lut_gas, equalize=0.5, n_colors=len(colors)).astype(np.float64)
-    # Modulate by density so thin gas is dim; result stays 0-255
     gas_img *= gas_density[:,:,None]
 
     # ── Layer 3: Spiral arms ──
     angle = np.arctan2(dy, dx)
-    n_arms = rng.integers(2, 5)
-    arm_tightness = rng.uniform(1.5, 4.0)
-    spiral_phase = rng.uniform(0, 2*np.pi)
     arm_field = np.zeros((h, w), dtype=np.float64)
     for arm in range(n_arms):
         arm_angle = angle - arm_tightness * np.log(r + 0.01) - spiral_phase - (2*np.pi*arm/n_arms)
@@ -321,18 +360,18 @@ def generate_cosmic(shape, colors, seed):
         arm_field += arm_wave * radial_envelope
     arm_field = np.clip(arm_field, 0, None)
     arm_field /= arm_field.max() + 1e-9
-    arm_noise = fbm((h, w), octaves=6, scale=1.5, seed=rng.integers(0, 2**31))
+    arm_noise = fbm((h, w), octaves=6, scale=1.5, seed=arm_noise_seed)
     arm_field = arm_field * (0.7 + 0.3 * arm_noise)
     rot = max(1, len(colors) // 2)
     arm_colors = colors[rot:] + colors[:rot]
     lut_arm = build_lut(arm_colors, 2048)
-    # arm_img: color from LUT, masked by arm_field so inter-arm gaps are dark
     arm_img = apply_lut(arm_field, lut_arm, equalize=0.5, n_colors=len(arm_colors)).astype(np.float64)
-    arm_img *= arm_field[:,:,None]   # 0-255 attenuated by arm intensity
+    arm_img *= arm_field[:,:,None]
 
     # ── Layer 4: Central glowing core ──
-    body_radius = rng.uniform(0.05, 0.12)
-    core_field = np.exp(-(r**2) / (body_radius**2 * 0.5))
+    # body_radius is a fraction of the image diagonal for resolution-independence
+    body_radius_px = body_radius * np.sqrt(w**2 + h**2) * 0.5
+    core_field = np.exp(-(r**2 * w**2) / (body_radius_px**2 * 0.5))
     # Use the brightest palette color for the core instead of hardcoded white/yellow
     inner_color = np.array(colors[-1], dtype=np.float64)
     outer_color = np.array(colors[len(colors)//2], dtype=np.float64)
